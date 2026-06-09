@@ -164,6 +164,9 @@ install_on_host() {
     START_TIME=$(date +%s)
 
     # SSH con timeout y sin comprobación de host conocido
+    # El "|| EXIT_CODE=$?" evita que set -e aborte la función si ssh falla,
+    # capturando el código de error para el bloque de notificación posterior.
+    local EXIT_CODE=0
     sshpass -p "$SSH_PASS" ssh \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
@@ -171,9 +174,7 @@ install_on_host() {
         -o ServerAliveInterval=30 \
         -o BatchMode=no \
         "$SSH_USER@$IP" \
-        "bash -s" <<< "$REMOTE_SCRIPT" > "$LOG" 2>&1
-
-    local EXIT_CODE=$?
+        "bash -s" <<< "$REMOTE_SCRIPT" > "$LOG" 2>&1 || EXIT_CODE=$?
     local END_TIME
     END_TIME=$(date +%s)
     local ELAPSED=$(( END_TIME - START_TIME ))
