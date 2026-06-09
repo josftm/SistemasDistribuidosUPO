@@ -32,7 +32,10 @@ read -rsp "  Contraseña: " SSH_PASS
 echo ""   # salto de línea tras la contraseña oculta
 
 LOG_DIR="/tmp/install_sd_logs"
+ERROR_LOG="${LOG_DIR}/errores.log"
 mkdir -p "$LOG_DIR"
+# Limpiar log de errores de ejecuciones anteriores
+> "$ERROR_LOG"
 
 # --- Extraer base de red y octetos finales ---
 BASE_NET=$(echo "$IP_START" | cut -d'.' -f1-3)
@@ -60,35 +63,92 @@ read -r -d '' REMOTE_SCRIPT << REMOTE_EOF || true
 set -e
 export DEBIAN_FRONTEND=noninteractive
 SUDO_PASS="${SSH_PASS}"
+export PATH="/snap/bin:\${PATH}"
 
-# Función auxiliar: ejecutar sudo sin prompt de contraseña
-# \$SUDO_PASS y \$@ se evalúan en el equipo REMOTO, no localmente
+# --- Funciones auxiliares ---
+
+# Ejecutar sudo sin prompt de contraseña
 sudo_cmd() {
     echo "\${SUDO_PASS}" | sudo -S "\$@" 2>/dev/null
 }
 
+# Comprueba si un paquete apt está instalado
+apt_installed() {
+    dpkg-query -W -f='\${Status}' "\$1" 2>/dev/null | grep -q "install ok installed"
+}
+
+# Comprueba si un paquete snap está instalado
+snap_installed() {
+    snap list "\$1" &>/dev/null
+}
+
+# Comprueba si una extensión de VS Code está instalada
+ext_installed() {
+    code --list-extensions --no-sandbox 2>/dev/null | grep -qi "\$1"
+}
+
+ALREADY_INSTALLED=()
+
+# =============================================================
+# [1/4] Update y upgrade
+# =============================================================
 echo "[1/4] Actualizando repositorios y paquetes del sistema..."
 sudo_cmd apt-get update -y -qq
 sudo_cmd apt-get upgrade -y -qq
 
-echo "[2/4] Instalando gcc y paquetes OpenMPI..."
-sudo_cmd apt-get install -y -qq gcc openmpi-bin openmpi-doc libopenmpi-dev
+# =============================================================
+# [2/4] gcc y OpenMPI
+# =============================================================
+echo "[2/4] Comprobando gcc y paquetes OpenMPI..."
 
-echo "[3/4] Instalando Visual Studio Code (snap)..."
-sudo_cmd snap install code --classic
+for PKG in gcc openmpi-bin openmpi-doc libopenmpi-dev; do
+    if apt_installed "\${PKG}"; then
+        echo "  [YA INSTALADO] \${PKG}"
+        ALREADY_INSTALLED+=("\${PKG}")
+    else
+        echo "  [INSTALANDO]   \${PKG}..."
+        sudo_cmd apt-get install -y -qq "\${PKG}"
+    fi
+done
 
-echo "[4/4] Instalando extensión C/C++ Extension Pack..."
-# snap añade /snap/bin al PATH; \$PATH se evalúa en el equipo remoto
-export PATH="/snap/bin:\${PATH}"
-if code --install-extension ms-vscode.cpptools-extension-pack \
-        --no-sandbox --force 2>/dev/null; then
-    echo "Extensión instalada correctamente."
+# =============================================================
+# [3/4] Visual Studio Code
+# =============================================================
+echo "[3/4] Comprobando Visual Studio Code..."
+
+if snap_installed code; then
+    echo "  [YA INSTALADO] Visual Studio Code"
+    ALREADY_INSTALLED+=("vscode")
 else
-    # Fallback: marcarla para instalación al primer arranque
-    # \$HOME se evalúa en el equipo remoto
-    mkdir -p "\${HOME}/.vscode"
-    echo "ms-vscode.cpptools-extension-pack" >> "\${HOME}/.vscode/.pending-extensions"
-    echo "[AVISO] La extensión se instalará la primera vez que el usuario abra VS Code."
+    echo "  [INSTALANDO]   Visual Studio Code..."
+    sudo_cmd snap install code --classic
+fi
+
+# =============================================================
+# [4/4] Extensión C/C++ Extension Pack
+# =============================================================
+echo "[4/4] Comprobando extensión C/C++ Extension Pack..."
+
+if ext_installed "ms-vscode.cpptools-extension-pack"; then
+    echo "  [YA INSTALADA] ms-vscode.cpptools-extension-pack"
+    ALREADY_INSTALLED+=("cpptools-extension-pack")
+else
+    echo "  [INSTALANDO]   ms-vscode.cpptools-extension-pack..."
+    if code --install-extension ms-vscode.cpptools-extension-pack \
+            --no-sandbox --force 2>/dev/null; then
+        echo "  Extensión instalada correctamente."
+    else
+        mkdir -p "\${HOME}/.vscode"
+        echo "ms-vscode.cpptools-extension-pack" >> "\${HOME}/.vscode/.pending-extensions"
+        echo "  [AVISO] La extensión se instalará la primera vez que el usuario abra VS Code."
+    fi
+fi
+
+# =============================================================
+# Resumen de software ya presente
+# =============================================================
+if [ "\${#ALREADY_INSTALLED[@]}" -gt 0 ]; then
+    echo "[RESUMEN] Software ya instalado previamente: \${ALREADY_INSTALLED[*]}"
 fi
 
 echo "[OK] Instalación completada."
@@ -120,9 +180,22 @@ install_on_host() {
 
     if [ "$EXIT_CODE" -eq 0 ]; then
         echo -e "${GREEN}✔ [$(date '+%H:%M:%S')] El equipo con IP ${IP} ha terminado correctamente (${ELAPSED}s).${NC}"
+        # Notificar software que ya estaba instalado previamente
+        local PREV
+        PREV=$(grep "\[YA INSTALAD" "$LOG" | sed 's/.*\[YA INSTALAD[AO]\] //' | tr '\n' ', ' | sed 's/, $//')
+        if [ -n "$PREV" ]; then
+            echo -e "${YELLOW}  ℹ ${IP}: ya estaba instalado → ${PREV}${NC}"
+        fi
     else
         echo -e "${RED}✘ [$(date '+%H:%M:%S')] El equipo con IP ${IP} ha fallado (código $EXIT_CODE, ${ELAPSED}s).${NC}"
-        echo -e "  Ver log detallado: ${LOG}"
+        # Volcar el log individual al log de errores consolidado
+        {
+            echo "======================================================"
+            echo "  EQUIPO: ${IP}  |  Código de salida: ${EXIT_CODE}  |  $(date '+%Y-%m-%d %H:%M:%S')"
+            echo "======================================================"
+            cat "$LOG"
+            echo ""
+        } >> "$ERROR_LOG"
     fi
 }
 
@@ -166,6 +239,7 @@ echo -e "${BLUE}======================================================"
 if [ "$FAILED" -eq 0 ]; then
     echo -e "${GREEN}  ✔ Todos los equipos completaron la instalación con éxito.${NC}"
 else
-    echo -e "${RED}  ✘ ${FAILED} equipo(s) fallaron. Revisa los logs en ${LOG_DIR}/${NC}"
+    echo -e "${RED}  ✘ ${FAILED} equipo(s) fallaron. Log consolidado de errores:${NC}"
+    echo -e "${RED}     ${ERROR_LOG}${NC}"
 fi
 echo -e "${BLUE}======================================================${NC}"
