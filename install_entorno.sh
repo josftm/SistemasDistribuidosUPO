@@ -62,8 +62,9 @@ export DEBIAN_FRONTEND=noninteractive
 SUDO_PASS="${SSH_PASS}"
 
 # Función auxiliar: ejecutar sudo sin prompt de contraseña
+# \$SUDO_PASS y \$@ se evalúan en el equipo REMOTO, no localmente
 sudo_cmd() {
-    echo "$SUDO_PASS" | sudo -S "$@" 2>/dev/null
+    echo "\${SUDO_PASS}" | sudo -S "\$@" 2>/dev/null
 }
 
 echo "[1/4] Actualizando repositorios y paquetes del sistema..."
@@ -74,20 +75,19 @@ echo "[2/4] Instalando gcc y paquetes OpenMPI..."
 sudo_cmd apt-get install -y -qq gcc openmpi-bin openmpi-doc libopenmpi-dev
 
 echo "[3/4] Instalando Visual Studio Code (snap)..."
-# En Ubuntu, snap es el método nativo y más fiable para VS Code
 sudo_cmd snap install code --classic
 
 echo "[4/4] Instalando extensión C/C++ Extension Pack..."
-# Instalación headless como el usuario eps
-# snap añade /snap/bin al PATH; asegurarse de que está disponible
-export PATH="/snap/bin:$PATH"
+# snap añade /snap/bin al PATH; \$PATH se evalúa en el equipo remoto
+export PATH="/snap/bin:\${PATH}"
 if code --install-extension ms-vscode.cpptools-extension-pack \
         --no-sandbox --force 2>/dev/null; then
     echo "Extensión instalada correctamente."
 else
     # Fallback: marcarla para instalación al primer arranque
-    mkdir -p "$HOME/.vscode"
-    echo "ms-vscode.cpptools-extension-pack" >> "$HOME/.vscode/.pending-extensions"
+    # \$HOME se evalúa en el equipo remoto
+    mkdir -p "\${HOME}/.vscode"
+    echo "ms-vscode.cpptools-extension-pack" >> "\${HOME}/.vscode/.pending-extensions"
     echo "[AVISO] La extensión se instalará la primera vez que el usuario abra VS Code."
 fi
 
